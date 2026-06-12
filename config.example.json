@@ -1,5 +1,7 @@
 {
   "app_version": "1.0.0",
   "update_metadata_url": "https://seuusuario.github.io/seurepo/version.json",
-  "file_id": "COLOQUE_AQUI_O_FILE_ID_DO_GOOGLE_DRIVE"
+  "file_id": "COLOQUE_AQUI_O_FILE_ID_DO_ZIP_UNICO_LEGADO",
+  "folder_id": "COLOQUE_AQUI_O_FOLDER_ID_DO_DRIVE_COM_UM_ZIP_POR_MOD",
+  "manifest_file_id": "COLOQUE_AQUI_O_FILE_ID_DO_MODS_MANIFEST_JSON"
 }

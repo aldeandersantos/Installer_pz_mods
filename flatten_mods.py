@@ -1,8 +1,8 @@
 """
-Achata mods da Steam Workshop.
+Achata mods da Steam Workshop dentro da pasta `mods`.
 
-Estrutura de origem:  <numero>/mods/<NomeRealDoMod>
-Resultado:            <NomeRealDoMod>   (na raiz)
+Estrutura de origem:  mods/<numero>/mods/<NomeRealDoMod>
+Resultado:            mods/<NomeRealDoMod>
 Depois apaga a pasta numerada (que fica vazia).
 
 Por padrao roda em modo simulacao (dry-run). Para aplicar de verdade:
@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+MODS_ROOT = ROOT / "mods"
 
 
 def main():
@@ -27,11 +28,15 @@ def main():
     if dry:
         print(">>> MODO SIMULACAO (use --apply para mover de verdade)\n")
 
+    if not MODS_ROOT.is_dir():
+        print("Pasta 'mods' nao encontrada.")
+        sys.exit(1)
+
     moved = 0
     skipped = 0
 
     # Pastas numericas: nome composto so por digitos
-    for numbered in sorted(ROOT.iterdir()):
+    for numbered in sorted(MODS_ROOT.iterdir()):
         if not numbered.is_dir() or not numbered.name.isdigit():
             continue
 
@@ -41,12 +46,12 @@ def main():
             skipped += 1
             continue
 
-        # Move cada mod de dentro de <numero>/mods/ para a raiz
+        # Move cada mod de dentro de mods/<numero>/mods/ para mods/
         for mod in list(mods_dir.iterdir()):
-            dest = ROOT / mod.name
+            dest = MODS_ROOT / mod.name
 
             if dest.exists():
-                print(f"[SUBSTITUIR] '{mod.name}' ja existe na raiz -> apagando "
+                print(f"[SUBSTITUIR] '{mod.name}' ja existe em mods/ -> apagando "
                       f"a antiga e usando a de {numbered.name}")
                 if not dry:
                     if dest.is_dir():
@@ -57,7 +62,7 @@ def main():
                 moved += 1
                 continue
 
-            print(f"[mover] {numbered.name}/mods/{mod.name}  ->  {mod.name}")
+            print(f"[mover] mods/{numbered.name}/mods/{mod.name}  ->  mods/{mod.name}")
             if not dry:
                 shutil.move(str(mod), str(dest))
             moved += 1

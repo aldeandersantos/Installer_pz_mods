@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,8 @@ DEFAULT_CONFIG = {
     "app_version": "1.0.0",
     "update_metadata_url": "https://seuusuario.github.io/seurepo/version.json",
     "file_id": "COLOQUE_AQUI_O_FILE_ID_DO_GOOGLE_DRIVE",
+    "folder_id": "",
+    "manifest_file_id": "",
 }
 
 
@@ -77,13 +80,30 @@ UPDATE_METADATA_URL = str(_config.get("update_metadata_url", ""))
 
 # --- CONFIGURACOES ---
 file_id = str(_config.get("file_id", ""))
-url = f"https://drive.google.com/uc?id={file_id}"
+folder_id = str(_config.get("folder_id", "")).strip()
+manifest_file_id = str(_config.get("manifest_file_id", "")).strip()
 
 # Pega o caminho do usuario logado automaticamente e monta a pasta do Zomboid
 pasta_usuario = os.path.expanduser("~")
+caminho_zomboid = os.path.join(pasta_usuario, "Zomboid")
 caminho_mods = os.path.join(pasta_usuario, "Zomboid", "mods")
+lua_dir = os.path.join(caminho_zomboid, "Lua")
 arquivo_zip = os.path.join(caminho_mods, "mods_download.zip")
 # ---------------------
+
+
+SPECIAL_PACKAGES = {
+    "mod_config.zip": {
+        "name": "__mod_config__",
+        "target_dir": lua_dir,
+        "target_files": (
+            "saved_modlists.txt",
+            "modmanager-mods.txt",
+            "pz_modlist_settings.cfg",
+        ),
+        "always_install": True,
+    }
+}
 
 
 # =====================================================================
@@ -154,8 +174,254 @@ def schedule_self_update(download_url):
     )
 
 
-def run_installation(log, set_stage, set_progress):
-    """Executa o download e a extracao dos mods.
+def get_drive_download_url(file_id_value):
+    return f"https://drive.google.com/uc?id={file_id_value}"
+
+
+def download_from_drive(file_id_value, destination):
+    if not str(file_id_value).strip():
+        raise ValueError("File ID do Google Drive nao configurado.")
+
+    if os.path.exists(destination):
+        os.remove(destination)
+
+    gdown.download(get_drive_download_url(file_id_value), destination, quiet=True)
+
+    if not os.path.exists(destination):
+        raise FileNotFoundError("O arquivo baixado nao foi encontrado.")
+
+
+def ensure_valid_mods_path():
+    normalized = os.path.normpath(caminho_mods)
+    expected_suffix = os.path.normpath(os.path.join("Zomboid", "mods"))
+    if not normalized.endswith(expected_suffix):
+        raise ValueError(f"Caminho de mods inesperado: {caminho_mods}")
+    return normalized
+
+
+def reset_mods_directory():
+    safe_mods_path = ensure_valid_mods_path()
+    if os.path.isdir(safe_mods_path):
+        shutil.rmtree(safe_mods_path)
+    os.makedirs(safe_mods_path, exist_ok=True)
+
+
+def extract_zip_with_mode(zip_path, destination_dir, overwrite_existing, log, set_progress):
+    extraidos = 0
+    ignorados = 0
+
+    with zipfile.ZipFile(zip_path, "r") as zip_ref:
+        membros = zip_ref.namelist()
+        total = len(membros) or 1
+        for indice, membro in enumerate(membros, start=1):
+            destino = os.path.join(destination_dir, membro)
+            should_extract = overwrite_existing or not os.path.exists(destino)
+            if should_extract:
+                zip_ref.extract(membro, destination_dir)
+                extraidos += 1
+            else:
+                ignorados += 1
+            set_progress(indice / total)
+
+    log(f"{extraidos} item(ns) instalado(s) | {ignorados} ja existente(s) ignorado(s).")
+    return extraidos, ignorados
+
+
+def load_manifest():
+    if not manifest_file_id:
+        return None
+
+    temp_dir = tempfile.mkdtemp(prefix="pz_manifest_")
+    manifest_path = os.path.join(temp_dir, "mods_manifest.json")
+    try:
+        download_from_drive(manifest_file_id, manifest_path)
+        with open(manifest_path, "r", encoding="utf-8") as manifest_file:
+            manifest = json.load(manifest_file)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    mods = manifest.get("mods")
+    if not isinstance(mods, list):
+        raise ValueError("Manifesto invalido: campo 'mods' ausente ou incorreto.")
+
+    parsed_mods = []
+    for entry in mods:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name", "")).strip()
+        entry_file_id = str(entry.get("file_id", "")).strip()
+        archive_name = str(entry.get("archive_name", f"{name}.zip")).strip() or f"{name}.zip"
+        if not name or not entry_file_id:
+            continue
+        parsed_mods.append(
+            {
+                "name": name,
+                "file_id": entry_file_id,
+                "archive_name": archive_name,
+                "special_package": get_special_package(archive_name),
+            }
+        )
+
+    if not parsed_mods:
+        raise ValueError("Manifesto nao possui mods validos.")
+
+    return parsed_mods
+
+
+def normalize_mod_name(name):
+    normalized = str(name).strip()
+    if normalized.lower().endswith(".zip"):
+        normalized = normalized[:-4]
+    return normalized.strip()
+
+
+def get_special_package(archive_name):
+    return SPECIAL_PACKAGES.get(str(archive_name).strip())
+
+
+def install_special_package(zip_path, special_package, log):
+    os.makedirs(special_package["target_dir"], exist_ok=True)
+    target_files = tuple(special_package.get("target_files", ()))
+
+    with zipfile.ZipFile(zip_path, "r") as zip_ref:
+        members = [name for name in zip_ref.namelist() if not name.endswith("/")]
+        if not members:
+            raise ValueError(
+                f"O pacote especial '{special_package['name']}' esta vazio."
+            )
+        members_by_name = {os.path.basename(member): member for member in members}
+
+        installed_files = []
+        for target_file in target_files:
+            matching_member = members_by_name.get(target_file)
+            if not matching_member:
+                continue
+
+            target_path = os.path.join(special_package["target_dir"], target_file)
+            with zip_ref.open(matching_member) as source, open(target_path, "wb") as destination:
+                destination.write(source.read())
+            installed_files.append(target_file)
+
+    if not installed_files:
+        expected_files = ", ".join(target_files)
+        raise ValueError(
+            f"O pacote especial nao contem nenhum dos arquivos esperados: {expected_files}."
+        )
+
+    log(
+        "Configuracoes de menu atualizadas em "
+        f"{special_package['target_dir']}: {', '.join(installed_files)}."
+    )
+
+
+def list_mod_archives_from_drive_folder(log):
+    if not folder_id:
+        return None
+
+    log("Lendo pasta compartilhada do Google Drive...")
+    folder_entries = gdown.download_folder(id=folder_id, quiet=True, skip_download=True)
+    mods = []
+    for entry in folder_entries:
+        archive_name = os.path.basename(entry.path)
+        if not archive_name.lower().endswith(".zip"):
+            continue
+        special_package = get_special_package(archive_name)
+        mods.append(
+            {
+                "name": special_package["name"] if special_package else normalize_mod_name(archive_name),
+                "file_id": entry.id,
+                "archive_name": archive_name,
+                "special_package": special_package,
+            }
+        )
+
+    if not mods:
+        raise ValueError("A pasta do Google Drive nao possui arquivos .zip validos.")
+
+    mods.sort(key=lambda item: item["name"].lower())
+    return mods
+
+
+def load_remote_mod_catalog(log):
+    if folder_id:
+        return list_mod_archives_from_drive_folder(log)
+    if manifest_file_id:
+        return load_manifest()
+    return None
+
+
+def install_from_manifest(install_mode, log, set_stage, set_progress):
+    os.makedirs(caminho_mods, exist_ok=True)
+    log(f"Destino detectado:\n  {caminho_mods}")
+    if folder_id:
+        log("Modo catalogo detectado: pasta compartilhada do Drive com um ZIP por mod.")
+    else:
+        log("Modo catalogo detectado: um ZIP por mod + manifesto.")
+    set_stage("Lendo catalogo de mods...")
+    set_progress(None)
+    mods = load_remote_mod_catalog(log)
+    total_mods = len(mods)
+
+    if install_mode == "replace_all":
+        log("Opcao selecionada: substituir todos os mods existentes.")
+        set_stage("Limpando pasta de mods...")
+        set_progress(None)
+        reset_mods_directory()
+        pendentes = mods
+    else:
+        log("Opcao selecionada: instalar apenas mods faltantes.")
+        existentes = {
+            item.name.lower()
+            for item in Path(caminho_mods).iterdir()
+            if item.is_dir()
+        }
+        pendentes = []
+        for mod in mods:
+            special_package = mod.get("special_package")
+            if special_package and special_package.get("always_install"):
+                pendentes.append(mod)
+                continue
+            if mod["name"].lower() not in existentes:
+                pendentes.append(mod)
+        log(f"Catalogo carregado: {total_mods} mod(s) | {len(pendentes)} pendente(s).")
+
+    if not pendentes:
+        set_progress(1)
+        log("Nenhum mod faltando. Nada para baixar.")
+        return 0, total_mods
+
+    temp_dir = tempfile.mkdtemp(prefix="pz_mods_")
+    instalados = 0
+    ignorados = total_mods - len(pendentes)
+    try:
+        for indice, mod in enumerate(pendentes, start=1):
+            archive_name = mod["archive_name"]
+            zip_path = os.path.join(temp_dir, archive_name)
+            set_stage(f"Baixando mod {indice}/{len(pendentes)}: {mod['name']}")
+            set_progress((indice - 1) / len(pendentes))
+            log(f"Baixando {mod['name']}...")
+            download_from_drive(mod["file_id"], zip_path)
+
+            if not zipfile.is_zipfile(zip_path):
+                raise ValueError(f"O arquivo do mod '{mod['name']}' nao e um ZIP valido.")
+
+            special_package = mod.get("special_package")
+            if special_package:
+                install_special_package(zip_path, special_package, log)
+            else:
+                with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                    zip_ref.extractall(caminho_mods)
+            instalados += 1
+            set_progress(indice / len(pendentes))
+            log(f"{mod['name']} instalado.")
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    return instalados, ignorados
+
+
+def install_from_single_package(install_mode, log, set_stage, set_progress):
+    """Executa o download e a extracao do ZIP unico legado.
 
     log(msg)            -> registra uma linha no terminal da interface
     set_stage(texto)    -> atualiza o rotulo de status
@@ -169,12 +435,18 @@ def run_installation(log, set_stage, set_progress):
         raise ValueError("file_id nao configurado em config.json.")
 
     log(f"Destino detectado:\n  {caminho_mods}")
+    if install_mode == "replace_all":
+        log("Opcao selecionada: substituir todos os mods existentes.")
+        set_stage("Limpando pasta de mods...")
+        set_progress(None)
+        reset_mods_directory()
+    else:
+        log("Modo legado detectado: ZIP unico.")
+        log("Opcao selecionada: instalar apenas itens ausentes do pacote.")
+
     set_stage("Baixando pacote do Google Drive...")
     set_progress(None)
-    gdown.download(url, arquivo_zip, quiet=True)
-
-    if not os.path.exists(arquivo_zip):
-        raise FileNotFoundError("O arquivo baixado nao foi encontrado.")
+    download_from_drive(file_id, arquivo_zip)
 
     if not zipfile.is_zipfile(arquivo_zip):
         raise ValueError(
@@ -184,25 +456,23 @@ def run_installation(log, set_stage, set_progress):
 
     log("Download concluido. Verificando integridade... OK")
     set_stage("Extraindo arquivos...")
-
-    extraidos = 0
-    ignorados = 0
-    with zipfile.ZipFile(arquivo_zip, "r") as zip_ref:
-        membros = zip_ref.namelist()
-        total = len(membros) or 1
-        for indice, membro in enumerate(membros, start=1):
-            destino = os.path.join(caminho_mods, membro)
-            if os.path.exists(destino):
-                ignorados += 1
-            else:
-                zip_ref.extract(membro, caminho_mods)
-                extraidos += 1
-            set_progress(indice / total)
+    extraidos, ignorados = extract_zip_with_mode(
+        arquivo_zip,
+        caminho_mods,
+        overwrite_existing=(install_mode == "replace_all"),
+        log=log,
+        set_progress=set_progress,
+    )
 
     os.remove(arquivo_zip)
-    log(f"{extraidos} item(ns) instalado(s) | {ignorados} ja existente(s) ignorado(s).")
     log("Pacote temporario removido.")
     return extraidos, ignorados
+
+
+def run_installation(install_mode, log, set_stage, set_progress):
+    if folder_id or manifest_file_id:
+        return install_from_manifest(install_mode, log, set_stage, set_progress)
+    return install_from_single_package(install_mode, log, set_stage, set_progress)
 
 
 # =====================================================================
@@ -334,6 +604,7 @@ class InstallerApp(ctk.CTk):
         self.configure(fg_color=BG)
 
         self._busy = False
+        self.install_mode = tk.StringVar(value="missing_only")
         self._build_ui()
         self.after(400, self._auto_check_updates)
 
@@ -433,8 +704,31 @@ class InstallerApp(ctk.CTk):
                            padx=22)
         self.progress.set(0)
 
+        mode_row = ctk.CTkFrame(footer, fg_color="transparent")
+        mode_row.grid(row=2, column=0, columnspan=2, sticky="ew",
+                      padx=22, pady=(14, 2))
+        mode_row.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(mode_row, text="MODO DE INSTALACAO",
+                     text_color=MUTED, font=(FONT_MONO, 11)).grid(
+            row=0, column=0, sticky="w", pady=(0, 8))
+
+        self.mode_switch = ctk.CTkSegmentedButton(
+            mode_row,
+            values=["SO FALTANTES", "SUBSTITUIR TUDO"],
+            selected_color=ACCENT,
+            selected_hover_color=ACCENT_DK,
+            unselected_color=BG_TERM,
+            unselected_hover_color=BG,
+            text_color=TEXT,
+            font=(FONT_DISPLAY, 13, "bold"),
+            command=self._on_mode_changed,
+        )
+        self.mode_switch.grid(row=1, column=0, sticky="w")
+        self.mode_switch.set("SO FALTANTES")
+
         actions = ctk.CTkFrame(footer, fg_color="transparent")
-        actions.grid(row=2, column=0, columnspan=2, sticky="ew",
+        actions.grid(row=3, column=0, columnspan=2, sticky="ew",
                      padx=22, pady=18)
         actions.grid_columnconfigure(0, weight=1)
 
@@ -455,7 +749,7 @@ class InstallerApp(ctk.CTk):
 
         # credito / autoria
         credit = ctk.CTkFrame(footer, fg_color="transparent")
-        credit.grid(row=3, column=0, columnspan=2, sticky="ew",
+        credit.grid(row=4, column=0, columnspan=2, sticky="ew",
                     padx=22, pady=(0, 14))
         ctk.CTkLabel(credit, text=f"feito por {AUTHOR}  ·  ",
                      text_color=MUTED, font=(FONT_MONO, 11)).pack(side="left")
@@ -494,23 +788,36 @@ class InstallerApp(ctk.CTk):
         if busy:
             self.install_btn.configure(state="disabled", text="INSTALANDO...")
             self.update_btn.configure(state="disabled")
+            self.mode_switch.configure(state="disabled")
             self.dot.configure(text="●  " + status, text_color=ACCENT)
         else:
             self.install_btn.configure(state="normal", text="▶  INSTALAR MODS")
             self.update_btn.configure(state="normal")
+            self.mode_switch.configure(state="normal")
             self.dot.configure(text="●  OCIOSO", text_color=MUTED)
+
+    def _on_mode_changed(self, choice):
+        selected_mode = "replace_all" if choice == "SUBSTITUIR TUDO" else "missing_only"
+        self.install_mode.set(selected_mode)
+        if selected_mode == "replace_all":
+            self._append("Modo definido para substituir toda a pasta de mods.", "muted")
+        else:
+            self._append("Modo definido para instalar apenas mods faltantes.", "muted")
 
     # ---------- acoes ----------
     def _on_install(self):
         if self._busy:
             return
         self._set_busy(True, "INSTALANDO")
-        self._append("Iniciando instalacao...", "accent")
-        threading.Thread(target=self._install_worker, daemon=True).start()
+        install_mode = self.install_mode.get()
+        mode_text = "substituir tudo" if install_mode == "replace_all" else "instalar so faltantes"
+        self._append(f"Iniciando instalacao ({mode_text})...", "accent")
+        threading.Thread(target=self._install_worker, args=(install_mode,), daemon=True).start()
 
-    def _install_worker(self):
+    def _install_worker(self, install_mode):
         try:
             extraidos, ignorados = run_installation(
+                install_mode=install_mode,
                 log=lambda m: self._ui(self._append, m),
                 set_stage=lambda s: self._ui(self._set_stage, s),
                 set_progress=lambda v: self._ui(self._set_progress, v),

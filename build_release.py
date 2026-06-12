@@ -22,11 +22,18 @@ def load_config():
     with open(CONFIG_FILE, "r", encoding="utf-8") as config_file:
         config = json.load(config_file)
 
-    required_keys = ("app_version", "update_metadata_url", "file_id")
+    required_keys = ("app_version", "update_metadata_url")
     missing = [key for key in required_keys if not str(config.get(key, "")).strip()]
     if missing:
         missing_text = ", ".join(missing)
         raise ValueError(f"config.json esta sem os campos obrigatorios: {missing_text}")
+
+    if (
+        not str(config.get("file_id", "")).strip()
+        and not str(config.get("folder_id", "")).strip()
+        and not str(config.get("manifest_file_id", "")).strip()
+    ):
+        raise ValueError("config.json precisa ter 'file_id', 'folder_id' ou 'manifest_file_id'.")
 
     return config
 
