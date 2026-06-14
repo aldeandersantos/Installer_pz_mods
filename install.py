@@ -11,6 +11,7 @@ import webbrowser
 import urllib.error
 import urllib.request
 import zipfile
+import re
 from pathlib import Path
 
 import customtkinter as ctk
@@ -77,6 +78,10 @@ APP_VERSION = str(_config.get("app_version", "1.0.0"))
 # Publique um JSON nesse endereco com este formato:
 # {"version": "1.0.1", "url": "https://seu-servidor/instalador.exe"}
 UPDATE_METADATA_URL = str(_config.get("update_metadata_url", ""))
+GITHUB_REPOSITORY = "aldeandersantos/Installer_pz_mods"
+GITHUB_LATEST_RELEASE_API_URL = (
+    f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
+)
 
 # --- CONFIGURACOES ---
 file_id = str(_config.get("file_id", ""))
@@ -111,36 +116,88 @@ SPECIAL_PACKAGES = {
 # =====================================================================
 
 def parse_version(version):
+    normalized = re.sub(r"^[^\d]+", "", str(version).strip())
+    if not normalized:
+        return (0,)
+
     parts = []
-    for chunk in version.strip().split("."):
-        try:
-            parts.append(int(chunk))
-        except ValueError:
+    for chunk in normalized.split("."):
+        match = re.search(r"\d+", chunk)
+        if match:
+            parts.append(int(match.group()))
+        else:
             parts.append(0)
+
+    while len(parts) < 3:
+        parts.append(0)
     return tuple(parts)
 
 
-def fetch_update_metadata():
+def fetch_json(url, headers=None, timeout=5):
+    request = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def fetch_update_metadata_from_url():
     if not UPDATE_METADATA_URL.strip():
-        return None
+        return None, "URL de metadados nao configurada."
 
     try:
-        with urllib.request.urlopen(UPDATE_METADATA_URL, timeout=5) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        data = fetch_json(UPDATE_METADATA_URL, timeout=5)
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        print(f"[Atualizacao] Nao foi possivel verificar atualizacoes: {exc}")
-        return None
+        return None, f"Falha ao ler os metadados remotos: {exc}"
 
     remote_version = str(data.get("version", "")).strip()
     download_url = str(data.get("url", "")).strip()
     if not remote_version or not download_url:
-        print("[Atualizacao] Metadados invalidos. Esperado: version + url.")
-        return None
+        return None, "Metadados invalidos. Esperado: version + url."
 
-    if parse_version(remote_version) <= parse_version(APP_VERSION):
-        return None
+    return {"version": remote_version, "url": download_url}, None
 
-    return {"version": remote_version, "url": download_url}
+
+def fetch_update_metadata_from_github():
+    try:
+        data = fetch_json(
+            GITHUB_LATEST_RELEASE_API_URL,
+            headers={"User-Agent": "PZ-Mod-Installer"},
+            timeout=10,
+        )
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        return None, f"Falha ao consultar a release mais recente no GitHub: {exc}"
+
+    remote_version = str(data.get("tag_name", "")).strip()
+    assets = data.get("assets", [])
+    download_url = ""
+
+    for asset in assets:
+        candidate_name = str(asset.get("name", "")).lower()
+        candidate_url = str(asset.get("browser_download_url", "")).strip()
+        if candidate_name.endswith(".exe") and candidate_url:
+            download_url = candidate_url
+            break
+
+    if not remote_version or not download_url:
+        return None, "Release do GitHub sem tag ou sem asset .exe para download."
+
+    return {"version": remote_version, "url": download_url}, None
+
+
+def fetch_update_metadata():
+    errors = []
+
+    for fetcher in (fetch_update_metadata_from_url, fetch_update_metadata_from_github):
+        info, error = fetcher()
+        if error:
+            errors.append(error)
+            continue
+
+        if parse_version(info["version"]) <= parse_version(APP_VERSION):
+            return {"status": "up_to_date"}
+
+        return {"status": "update_available", **info}
+
+    return {"status": "error", "message": " | ".join(errors)}
 
 
 def download_file(download_url, destination):
@@ -846,9 +903,23 @@ class InstallerApp(ctk.CTk):
 
     def _update_worker(self, manual):
         info = fetch_update_metadata()
-        if not info:
+        if info["status"] == "error":
+            print(f"[Atualizacao] {info['message']}")
             if manual:
-                self._ui(self._append, "Voce ja esta na versao mais recente.", "muted")
+                self._ui(
+                    self._append,
+                    "Nao foi possivel verificar atualizacoes agora.",
+                    "red",
+                )
+            return
+
+        if info["status"] == "up_to_date":
+            if manual:
+                self._ui(
+                    self._append,
+                    "Voce ja esta na versao mais recente.",
+                    "muted",
+                )
             return
         self._ui(self._prompt_update, info)
 
