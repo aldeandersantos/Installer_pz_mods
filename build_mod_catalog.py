@@ -47,13 +47,21 @@ def build_catalog(source_dir, output_dir):
     if not mod_dirs and not available_config_files:
         raise ValueError(f"Nenhuma subpasta de mod encontrada em: {source_dir}")
 
+    created_mods = 0
+    skipped_mods = 0
+
     for mod_dir in mod_dirs:
         archive_name = f"{mod_dir.name}.zip"
         zip_path = output_dir / archive_name
-        if zip_path.exists():
-            zip_path.unlink()
 
-        zip_directory(mod_dir, zip_path)
+        if zip_path.exists():
+            skipped_mods += 1
+            print(f"[skip] {mod_dir.name} -> {archive_name} ja existe")
+        else:
+            zip_directory(mod_dir, zip_path)
+            created_mods += 1
+            print(f"[ok] {mod_dir.name} -> {archive_name}")
+
         manifest["mods"].append(
             {
                 "name": mod_dir.name,
@@ -61,14 +69,16 @@ def build_catalog(source_dir, output_dir):
                 "file_id": "PREENCHER_NO_DRIVE",
             }
         )
-        print(f"[ok] {mod_dir.name} -> {archive_name}")
 
     if available_config_files:
         mod_config_zip = output_dir / MOD_CONFIG_ARCHIVE
-        if mod_config_zip.exists():
-            mod_config_zip.unlink()
 
-        zip_files(available_config_files, mod_config_zip)
+        if mod_config_zip.exists():
+            print(f"[skip] configuracoes de menu -> {MOD_CONFIG_ARCHIVE} ja existe")
+        else:
+            zip_files(available_config_files, mod_config_zip)
+            print(f"[ok] configuracoes de menu -> {MOD_CONFIG_ARCHIVE}")
+
         manifest["mods"].append(
             {
                 "name": "__mod_config__",
@@ -76,7 +86,6 @@ def build_catalog(source_dir, output_dir):
                 "file_id": "PREENCHER_NO_DRIVE",
             }
         )
-        print(f"[ok] configuracoes de menu -> {MOD_CONFIG_ARCHIVE}")
 
     manifest_path = output_dir / "mods_manifest.json"
     manifest_path.write_text(
@@ -84,7 +93,9 @@ def build_catalog(source_dir, output_dir):
         encoding="utf-8",
     )
     print(f"\nCatalogo gerado em: {output_dir}")
-    print(f"Mods processados: {len(mod_dirs)}")
+    print(f"Mods encontrados: {len(mod_dirs)}")
+    print(f"ZIPs criados: {created_mods}")
+    print(f"ZIPs ignorados por ja existirem: {skipped_mods}")
     if available_config_files:
         print("Arquivos de menu incluidos: " + ", ".join(path.name for path in available_config_files))
     print("Proximo passo:")
