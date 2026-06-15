@@ -1,5 +1,4 @@
 import argparse
-import json
 import shutil
 import zipfile
 from pathlib import Path
@@ -39,7 +38,6 @@ def build_catalog(source_dir, output_dir):
         raise FileNotFoundError(f"Pasta de origem nao encontrada: {source_dir}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    manifest = {"mods": []}
     mod_dirs = sorted(item for item in source_dir.iterdir() if item.is_dir())
     mod_config_paths = [source_dir / file_name for file_name in MOD_CONFIG_FILES]
     available_config_files = [path for path in mod_config_paths if path.is_file()]
@@ -62,14 +60,6 @@ def build_catalog(source_dir, output_dir):
             created_mods += 1
             print(f"[ok] {mod_dir.name} -> {archive_name}")
 
-        manifest["mods"].append(
-            {
-                "name": mod_dir.name,
-                "archive_name": archive_name,
-                "file_id": "PREENCHER_NO_DRIVE",
-            }
-        )
-
     if available_config_files:
         mod_config_zip = output_dir / MOD_CONFIG_ARCHIVE
 
@@ -79,19 +69,6 @@ def build_catalog(source_dir, output_dir):
             zip_files(available_config_files, mod_config_zip)
             print(f"[ok] configuracoes de menu -> {MOD_CONFIG_ARCHIVE}")
 
-        manifest["mods"].append(
-            {
-                "name": "__mod_config__",
-                "archive_name": MOD_CONFIG_ARCHIVE,
-                "file_id": "PREENCHER_NO_DRIVE",
-            }
-        )
-
-    manifest_path = output_dir / "mods_manifest.json"
-    manifest_path.write_text(
-        json.dumps(manifest, ensure_ascii=True, indent=2),
-        encoding="utf-8",
-    )
     print(f"\nCatalogo gerado em: {output_dir}")
     print(f"Mods encontrados: {len(mod_dirs)}")
     print(f"ZIPs criados: {created_mods}")
@@ -99,9 +76,8 @@ def build_catalog(source_dir, output_dir):
     if available_config_files:
         print("Arquivos de menu incluidos: " + ", ".join(path.name for path in available_config_files))
     print("Proximo passo:")
-    print("1. Suba os ZIPs para uma pasta compartilhada do Google Drive.")
-    print("2. Configure o folder_id dessa pasta no config.json.")
-    print("3. O mods_manifest.json fica como fallback opcional, nao e mais obrigatorio.")
+    print("Suba os ZIPs como assets da release de mods no GitHub (tag 'mods-latest').")
+    print("O workflow .github/workflows/publish-mods.yml faz isso automaticamente.")
 
 
 def main():

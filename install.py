@@ -15,7 +15,6 @@ import re
 from pathlib import Path
 
 import customtkinter as ctk
-import gdown
 
 # ==========================================
 #       Instalador feito por Aldeander
@@ -24,9 +23,7 @@ import gdown
 DEFAULT_CONFIG = {
     "app_version": "1.0.0",
     "update_metadata_url": "https://seuusuario.github.io/seurepo/version.json",
-    "file_id": "COLOQUE_AQUI_O_FILE_ID_DO_GOOGLE_DRIVE",
-    "folder_id": "",
-    "manifest_file_id": "",
+    "mods_release_tag": "mods-latest",
 }
 
 
@@ -84,16 +81,17 @@ GITHUB_LATEST_RELEASE_API_URL = (
 )
 
 # --- CONFIGURACOES ---
-file_id = str(_config.get("file_id", ""))
-folder_id = str(_config.get("folder_id", "")).strip()
-manifest_file_id = str(_config.get("manifest_file_id", "")).strip()
+# Tag da release do GitHub que hospeda um ZIP por mod (assets da release).
+MODS_RELEASE_TAG = str(_config.get("mods_release_tag", "mods-latest")).strip() or "mods-latest"
+GITHUB_MODS_RELEASE_API_URL = (
+    f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/tags/{MODS_RELEASE_TAG}"
+)
 
 # Pega o caminho do usuario logado automaticamente e monta a pasta do Zomboid
 pasta_usuario = os.path.expanduser("~")
 caminho_zomboid = os.path.join(pasta_usuario, "Zomboid")
 caminho_mods = os.path.join(pasta_usuario, "Zomboid", "mods")
 lua_dir = os.path.join(caminho_zomboid, "Lua")
-arquivo_zip = os.path.join(caminho_mods, "mods_download.zip")
 # ---------------------
 
 
@@ -201,9 +199,12 @@ def fetch_update_metadata():
 
 
 def download_file(download_url, destination):
-    with urllib.request.urlopen(download_url, timeout=30) as response:
+    request = urllib.request.Request(
+        download_url, headers={"User-Agent": "PZ-Mod-Installer"}
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
         with open(destination, "wb") as target:
-            target.write(response.read())
+            shutil.copyfileobj(response, target)
 
 
 def schedule_self_update(download_url):
@@ -308,18 +309,14 @@ def schedule_self_update(download_url):
     )
 
 
-def get_drive_download_url(file_id_value):
-    return f"https://drive.google.com/uc?id={file_id_value}"
-
-
-def download_from_drive(file_id_value, destination):
-    if not str(file_id_value).strip():
-        raise ValueError("File ID do Google Drive nao configurado.")
+def download_mod_archive(download_url, destination):
+    if not str(download_url).strip():
+        raise ValueError("URL de download do mod nao configurada.")
 
     if os.path.exists(destination):
         os.remove(destination)
 
-    gdown.download(get_drive_download_url(file_id_value), destination, quiet=True)
+    download_file(download_url, destination)
 
     if not os.path.exists(destination):
         raise FileNotFoundError("O arquivo baixado nao foi encontrado.")
@@ -361,45 +358,31 @@ def extract_zip_with_mode(zip_path, destination_dir, overwrite_existing, log, se
     return extraidos, ignorados
 
 
-def load_manifest():
-    if not manifest_file_id:
-        return None
+def fetch_mods_release_assets():
+    data = fetch_json(
+        GITHUB_MODS_RELEASE_API_URL,
+        headers={"User-Agent": "PZ-Mod-Installer"},
+        timeout=10,
+    )
 
-    temp_dir = tempfile.mkdtemp(prefix="pz_manifest_")
-    manifest_path = os.path.join(temp_dir, "mods_manifest.json")
-    try:
-        download_from_drive(manifest_file_id, manifest_path)
-        with open(manifest_path, "r", encoding="utf-8") as manifest_file:
-            manifest = json.load(manifest_file)
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-    mods = manifest.get("mods")
-    if not isinstance(mods, list):
-        raise ValueError("Manifesto invalido: campo 'mods' ausente ou incorreto.")
-
-    parsed_mods = []
-    for entry in mods:
-        if not isinstance(entry, dict):
+    assets = data.get("assets", [])
+    catalog = []
+    for asset in assets:
+        archive_name = str(asset.get("name", "")).strip()
+        download_url = str(asset.get("browser_download_url", "")).strip()
+        if not archive_name.lower().endswith(".zip") or not download_url:
             continue
-        name = str(entry.get("name", "")).strip()
-        entry_file_id = str(entry.get("file_id", "")).strip()
-        archive_name = str(entry.get("archive_name", f"{name}.zip")).strip() or f"{name}.zip"
-        if not name or not entry_file_id:
-            continue
-        parsed_mods.append(
+        special_package = get_special_package(archive_name)
+        catalog.append(
             {
-                "name": name,
-                "file_id": entry_file_id,
+                "name": special_package["name"] if special_package else normalize_mod_name(archive_name),
+                "download_url": download_url,
                 "archive_name": archive_name,
-                "special_package": get_special_package(archive_name),
+                "special_package": special_package,
             }
         )
 
-    if not parsed_mods:
-        raise ValueError("Manifesto nao possui mods validos.")
-
-    return parsed_mods
+    return catalog
 
 
 def normalize_mod_name(name):
@@ -448,49 +431,28 @@ def install_special_package(zip_path, special_package, log):
     )
 
 
-def list_mod_archives_from_drive_folder(log):
-    if not folder_id:
-        return None
-
-    log("Lendo pasta compartilhada do Google Drive...")
-    folder_entries = gdown.download_folder(id=folder_id, quiet=True, skip_download=True)
-    mods = []
-    for entry in folder_entries:
-        archive_name = os.path.basename(entry.path)
-        if not archive_name.lower().endswith(".zip"):
-            continue
-        special_package = get_special_package(archive_name)
-        mods.append(
-            {
-                "name": special_package["name"] if special_package else normalize_mod_name(archive_name),
-                "file_id": entry.id,
-                "archive_name": archive_name,
-                "special_package": special_package,
-            }
-        )
+def load_remote_mod_catalog(log):
+    log(f"Lendo catalogo da release '{MODS_RELEASE_TAG}' no GitHub...")
+    try:
+        mods = fetch_mods_release_assets()
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"Falha ao consultar a release de mods no GitHub: {exc}"
+        ) from exc
 
     if not mods:
-        raise ValueError("A pasta do Google Drive nao possui arquivos .zip validos.")
+        raise ValueError(
+            f"A release '{MODS_RELEASE_TAG}' nao possui arquivos .zip de mods."
+        )
 
     mods.sort(key=lambda item: item["name"].lower())
     return mods
 
 
-def load_remote_mod_catalog(log):
-    if folder_id:
-        return list_mod_archives_from_drive_folder(log)
-    if manifest_file_id:
-        return load_manifest()
-    return None
-
-
-def install_from_manifest(install_mode, log, set_stage, set_progress):
+def install_mods(install_mode, log, set_stage, set_progress):
     os.makedirs(caminho_mods, exist_ok=True)
     log(f"Destino detectado:\n  {caminho_mods}")
-    if folder_id:
-        log("Modo catalogo detectado: pasta compartilhada do Drive com um ZIP por mod.")
-    else:
-        log("Modo catalogo detectado: um ZIP por mod + manifesto.")
+    log(f"Catalogo de mods hospedado em GitHub Releases (tag '{MODS_RELEASE_TAG}').")
     set_stage("Lendo catalogo de mods...")
     set_progress(None)
     mods = load_remote_mod_catalog(log)
@@ -534,7 +496,7 @@ def install_from_manifest(install_mode, log, set_stage, set_progress):
             set_stage(f"Baixando mod {indice}/{len(pendentes)}: {mod['name']}")
             set_progress((indice - 1) / len(pendentes))
             log(f"Baixando {mod['name']}...")
-            download_from_drive(mod["file_id"], zip_path)
+            download_mod_archive(mod["download_url"], zip_path)
 
             if not zipfile.is_zipfile(zip_path):
                 raise ValueError(f"O arquivo do mod '{mod['name']}' nao e um ZIP valido.")
@@ -554,59 +516,8 @@ def install_from_manifest(install_mode, log, set_stage, set_progress):
     return instalados, ignorados
 
 
-def install_from_single_package(install_mode, log, set_stage, set_progress):
-    """Executa o download e a extracao do ZIP unico legado.
-
-    log(msg)            -> registra uma linha no terminal da interface
-    set_stage(texto)    -> atualiza o rotulo de status
-    set_progress(valor) -> None = indeterminado; float 0..1 = progresso real
-
-    Retorna (extraidos, ignorados). Lanca excecao em caso de falha.
-    """
-    os.makedirs(caminho_mods, exist_ok=True)
-
-    if not file_id.strip():
-        raise ValueError("file_id nao configurado em config.json.")
-
-    log(f"Destino detectado:\n  {caminho_mods}")
-    if install_mode == "replace_all":
-        log("Opcao selecionada: substituir todos os mods existentes.")
-        set_stage("Limpando pasta de mods...")
-        set_progress(None)
-        reset_mods_directory()
-    else:
-        log("Modo legado detectado: ZIP unico.")
-        log("Opcao selecionada: instalar apenas itens ausentes do pacote.")
-
-    set_stage("Baixando pacote do Google Drive...")
-    set_progress(None)
-    download_from_drive(file_id, arquivo_zip)
-
-    if not zipfile.is_zipfile(arquivo_zip):
-        raise ValueError(
-            "O download nao e um ZIP valido. "
-            "Verifique se o link/arquivo do Google Drive esta correto."
-        )
-
-    log("Download concluido. Verificando integridade... OK")
-    set_stage("Extraindo arquivos...")
-    extraidos, ignorados = extract_zip_with_mode(
-        arquivo_zip,
-        caminho_mods,
-        overwrite_existing=(install_mode == "replace_all"),
-        log=log,
-        set_progress=set_progress,
-    )
-
-    os.remove(arquivo_zip)
-    log("Pacote temporario removido.")
-    return extraidos, ignorados
-
-
 def run_installation(install_mode, log, set_stage, set_progress):
-    if folder_id or manifest_file_id:
-        return install_from_manifest(install_mode, log, set_stage, set_progress)
-    return install_from_single_package(install_mode, log, set_stage, set_progress)
+    return install_mods(install_mode, log, set_stage, set_progress)
 
 
 # =====================================================================
